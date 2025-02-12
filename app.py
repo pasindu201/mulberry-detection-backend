@@ -9,11 +9,14 @@ from flask_cors import CORS
 import os
 import glob
 import json
-from pathlib import Path
 from torchvision import models, transforms
 import torch
 import datetime
 from torch import nn
+from flask import Flask, request, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_bcrypt import Bcrypt
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 
 app = Flask(__name__)
 CORS(app) 
@@ -40,6 +43,66 @@ transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
+
+# Secure Database Configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
+    'DATABASE_URL', 'postgresql://postgres:password@postgres-service:5432/mydb'
+)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'supersecretkey')
+
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+jwt = JWTManager(app)
+
+# User Model
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+
+# Create Database
+with app.app_context():
+    db.create_all()
+
+# User Registration
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    if not data or not data.get("username") or not data.get("password"):
+        return jsonify({"message": "Username and password required"}), 400
+    
+    hashed_password = bcrypt.generate_password_hash(data['password']).decode('utf-8')
+    new_user = User(username=data['username'], password=hashed_password)
+    
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+        return jsonify({"message": "User registered successfully!"}), 201
+    except:
+        return jsonify({"message": "Username already exists!"}), 400
+
+# User Login
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    if not data or not data.get("username") or not data.get("password"):
+        return jsonify({"message": "Username and password required"}), 400
+    
+    user = User.query.filter_by(username=data['username']).first()
+    
+    if user and bcrypt.check_password_hash(user.password, data['password']):
+        access_token = create_access_token(identity=user.username)
+        return jsonify({"message": "Login successful", "access_token": access_token}), 200
+    
+    return jsonify({"message": "Invalid credentials"}), 401
+
+# Protected Route
+@app.route('/protected', methods=['GET'])
+@jwt_required()
+def protected():
+    current_user = get_jwt_identity()
+    return jsonify({"message": f"Hello, {current_user}! This is a protected route."})
 
 def open_image_with_cv2(file):
     # Read the image from file as a numpy array
@@ -161,6 +224,12 @@ def getLeafDiseasePrediction():
     
     except Exception as e:
         return jsonify({'error': f'Error processing the image: {str(e)}'}), 500
+    
+
+@app.route("/")
+def hello():
+    return "Hello, World!"    
+
 
 def process_predictions(results):
     try:
@@ -172,4 +241,4 @@ def process_predictions(results):
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host="0.0.0.0", port=5000)
